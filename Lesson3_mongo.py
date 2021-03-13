@@ -11,40 +11,52 @@ import pandas as pd
 from pymongo import MongoClient
 
 
-# 1) Функция, создающая базу данных:
+# 1) Функция, инициализации базы данных:
 def mongodb_func():
     client = MongoClient('127.0.0.1', 27017)
     database = client['vacancyDB']
     return database
 
+# # 2) Перед перебором и записью данных создадим функцию,
+# # проверяющую вакансию на наличие в БД (если данные отсутствуют в коллекции, то добавляем)
+# def paste_new_vacancy_func(collection, vacancy_data):
+#     if not collection.find_one(vacancy_data):
+#         collection.insert_one(vacancy_data)
 
-# запуск функции для сбора вакансий в БД.
+# 2) Функция обновления и добавления новых вакансий:
+def insert_vac_if_not_exists(collection, filter, vacancy_data) -> object:
+    collection.update_one(filter, {'$set': vacancy_data}, upsert=True)
+    # описание работы функции:
+    # - передаем в качестве filter уникальную ссылку на вакансию,
+    # - если ссылка есть, то '$set' позволяет обновить данные (перезапись данных vacancy_data),
+    # - если ссылки нет, то upsert=True позволяет записать новые данные, которые не совпали с filter
+
+# 3). Функция, которая производит поиск и выводит на экран вакансии с заработной платой
+# больше введённой суммы
+def find_vacancies(collection, search_salary):
+    return list(collection.find({'$or': [{'salary_min': {'$gte': search_salary}}, {'salary_max': {'$gte': search_salary}}]}))[:]
+
+
+# Создаем/запускаем БД:
 db = mongodb_func()
-# создадим две коллекции по источнику данных:
+
+
+# Создадим две коллекции по источнику данных:
 collection_hhru = db.hhru
 collection_sjru = db.sjru
 
 
-# 2) Перед перебором и записью данных создадим функцию,
-# проверяющую вакансию на наличие в БД (если данные отсутствуют в коллекции, то добавляем)
-def paste_new_vacancy_func(collection, vacancy_data):
-    if not collection.find_one(vacancy_data):
-        collection.insert_one(vacancy_data)
+# Сбор данных и добавление их в соответствующую коллекцию
+text = input('Поиск вакансий в Москве и области. Введите искомую вакансию... ')
 
-
-# 3) Сбор данных и добавление их в соответствующую коллекцию
-text = input('Поиск вакансий в банковской сфере в Москве и области. Введите искомую вакансию... ')
-
+"""
 # Поиск по HH.ru:
+"""
+
 # Формируем параметры ссылки
 main_link_hh = 'https://hh.ru'
 params = {'area': '1',  # Москва
-          'clusters': 'true',
-          'enable_snippets': 'true',
           'text': text,
-          'specialization': '5',  # Банки
-          'from': 'cluster_professionalArea',
-          'showClusters': 'true',
           'page': ''}  # номер страницы будет передаваться в цикле при переборе всех страниц
 headers = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4440.0 Safari/537.36'}
@@ -74,16 +86,16 @@ for page in range(0, last_page):
         'data-qa': ['vacancy-serp__vacancy', 'vacancy-serp__vacancy vacancy-serp__vacancy_premium']})
 
     for vacancy in vacancy_list:
-        vacancy_data = {}
+        vacancy_data = {'site': 'hh.ru'}
         # поиск наименования вакансии:
         vacancy_title = vacancy.find('div', {'class': 'vacancy-serp-item__info'})
-        vacancy_name = vacancy_title.getText()
+        vacancy_data['name'] = vacancy_title.getText()
         # поиск зп:
         vacancy_salary = vacancy.find('span', {'data-qa': 'vacancy-serp__vacancy-compensation'})
         if not vacancy_salary:
-            salary_min = None
-            salary_max = None
-            salary_currency = None
+            vacancy_data['salary_min'] = None
+            vacancy_data['salary_max'] = None
+            vacancy_data['currency'] = None
         else:
             vacancy_salary = vacancy_salary.getText()
             vacancy_salary = vacancy_salary.replace('\xa0', '')
@@ -91,48 +103,40 @@ for page in range(0, last_page):
             vacancy_salary = vacancy_salary.split()
 
             if vacancy_salary[0] == 'до':
-                salary_min = None
-                salary_max = int(vacancy_salary[1])
-                salary_currency = vacancy_salary[2]
+                vacancy_data['salary_min'] = None
+                vacancy_data['salary_max'] = int(vacancy_salary[1])
+                vacancy_data['currency'] = vacancy_salary[2]
             elif vacancy_salary[0] == 'от':
-                salary_min = int(vacancy_salary[1])
-                salary_max = None
-                salary_currency = vacancy_salary[2]
+                vacancy_data['salary_min'] = int(vacancy_salary[1])
+                vacancy_data['salary_max'] = None
+                vacancy_data['currency'] = vacancy_salary[2]
             else:
-                salary_min = int(vacancy_salary[0])
-                salary_max = int(vacancy_salary[1])
-                salary_currency = vacancy_salary[2]
+                vacancy_data['salary_min'] = int(vacancy_salary[0])
+                vacancy_data['salary_max'] = int(vacancy_salary[1])
+                vacancy_data['currency'] = vacancy_salary[2]
         # поиск ссылки на вакансию:
-        vacancy_link = vacancy_title.find('a')['href']
-
+        vacancy_data['link'] = vacancy_title.find('a')['href']
         # поиск работодателя:
         vacancy_company = vacancy.find('div', {'class': 'vacancy-serp-item__meta-info-company'})
-        vacancy_employer = vacancy_company.getText()
-
-        # заполняем словарь данных:
-        vacancy_data['name'] = vacancy_name
-        vacancy_data['salary_min'] = salary_min
-        vacancy_data['salary_max'] = salary_max
-        vacancy_data['currency'] = salary_currency
-        vacancy_data['link'] = vacancy_link
-        vacancy_data['employer'] = vacancy_employer
-        vacancy_data['site'] = 'hh.ru'
+        vacancy_data['employer'] = vacancy_company.getText()
 
         # запишем данные в коллекцию  MongoDB с помощью функции,
         # которая предварительно проверяет на наличие этих данных в коллекции:
-        paste_new_vacancy_func(collection_hhru, vacancy_data)
+        insert_vac_if_not_exists(collection_hhru, {'link': vacancy_data.get('link')}, vacancy_data)
+        #pprint(vacancy_data)
 
-# Поиск по superjob.ru
-# https://www.superjob.ru/vacancy/search/?keywords=кредитование&catalogues%5B0%5D=381&geo=4&click_from=facet
+
+"""
+Поиск по superjob.ru
+https://www.superjob.ru/vacancy/search/?keywords=кредитование&geo=4&click_from=facet
+
+"""
 
 main_link_sj = 'https://superjob.ru'
 headers = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4440.0 Safari/537.36'}
 params = {
     'keywords': text,
-    'catalogues': {'382', '383', '384', '385', '386', '387', '388', '389', '390', '391', '392', '393', '394', '395',
-                   '396', '397', '398', '399', '400', '401', '402', '403', '404', '405', '406', '407', '408', '411',
-                   '412', '413'},  # банки
     'geo': 4,  # Москва
     'click_from': 'facet',
     'page': '1'
@@ -147,51 +151,52 @@ while True:
 
     # парсинг страницы
     for vacancy in vacancy_list:
-        vacancy_data = {}
+        vacancy_data = {'site': 'superjob.ru'}
         # поиск наименования вакансии:
         vacancy_title = vacancy.find('div', {'class': ['_3mfro PlM3e _2JVkc _3LJqf']})
-        vacancy_name = vacancy_title.get_text() if vacancy_title else ''
+        if vacancy_title:
+            vacancy_data['name'] = vacancy_title.get_text()
+        else:
+            vacancy_data['name'] = None
         # поиск ссылки на вакансию:
-        vacancy_link = main_link_sj + vacancy_title.next['href'] if vacancy_title else ''
+        if vacancy_title:
+            vacancy_data['link'] = main_link_sj + vacancy_title.next['href']
+        else:
+            vacancy_data['link'] = None
 
         # поиск зп:
         vacancy_salary = vacancy.find('span', {'class': ['_3mfro _2Wp8I PlM3e _2JVkc _2VHxz']})
-        salary_min = None
-        salary_max = None
-        salary_currency = None
+        vacancy_data['salary_min'] = None
+        vacancy_data['salary_max'] = None
+        vacancy_data['currency'] = None
         if vacancy_salary:
             vacancy_salary = vacancy_salary.text
             if vacancy_salary.find('от') != -1:
-                salary_min = int(''.join([char for char in vacancy_salary if char.isdigit()]))
-                salary_currency = vacancy_salary[-4:]
+                vacancy_data['salary_min'] = int(''.join([char for char in vacancy_salary if char.isdigit()]))
+                vacancy_data['currency'] = vacancy_salary[-4:]
             if vacancy_salary.find('до') != -1:
-                salary_max = (''.join([char for char in vacancy_salary if char.isdigit()]))
-                salary_currency = vacancy_salary[-4:]
+                vacancy_data['salary_max'] = (''.join([char for char in vacancy_salary if char.isdigit()]))
+                vacancy_data['currency'] = vacancy_salary[-4:]
             if vacancy_salary.find('—') != -1:
-                salary_min = int(''.join([char for char in vacancy_salary.split('—')[0] if char.isdigit()]))
-                salary_max = int(''.join([char for char in vacancy_salary.split('—')[1] if char.isdigit()]))
-                salary_currency = vacancy_salary[-4:]
+                vacancy_data['salary_min'] = int(''.join([char for char in vacancy_salary.split('—')[0] if char.isdigit()]))
+                vacancy_data['salary_max'] = int(''.join([char for char in vacancy_salary.split('—')[1] if char.isdigit()]))
+                vacancy_data['currency'] = vacancy_salary[-4:]
             if vacancy_salary.find('договор') != -1:
-                salary_min = None
-                salary_max = None
-                salary_currency = None
+                vacancy_data['salary_min'] = None
+                vacancy_data['salary_max'] = None
+                vacancy_data['currency'] = None
 
         # поиск работодателя:
         vacancy_company = vacancy.find('span', {'class': ['f-test-text-vacancy-item-company-name']})
-        vacancy_employer = vacancy_company.getText()
+        if vacancy_company is not None:
+            vacancy_data['employer'] = vacancy_company.getText()
+        else:
+            vacancy_data['employer'] = None
 
-        # заполняем словарь данных:
-        vacancy_data['name'] = vacancy_name
-        vacancy_data['salary_min'] = salary_min
-        vacancy_data['salary_max'] = salary_max
-        vacancy_data['currency'] = salary_currency
-        vacancy_data['link'] = vacancy_link
-        vacancy_data['employer'] = vacancy_employer
-        vacancy_data['site'] = 'superjob.ru'
-
+        # print()
         # запишем данные в коллекцию  MongoDB с помощью функции,
         # которая предварительно проверяет на наличие этих данных в коллекции:
-        paste_new_vacancy_func(collection_sjru, vacancy_data)
+        insert_vac_if_not_exists(collection_sjru, {'link': vacancy_data.get('link')}, vacancy_data)
 
     # print()
     # если есть кнопка "дальше", то смена номера страницы и запуск цикла снова, иначе exit
@@ -202,11 +207,7 @@ while True:
         break
 
 
-# 4. Функция, которая производит поиск и выводит на экран вакансии с заработной платой
-# больше введённой суммы
-def find_vacancies(collection, search_salary):
-    return list(collection.find({'$or': [{'salary_min': {'$gte': search_salary}}, {'salary_max': {'$gte': search_salary}}]}))[:]
-
+# поиск и вывод на экран вакансии с заработной платой больше введённой суммы:
 
 search_salary = input('Введите минимальную зарплату для поиска вакансий на hhru: ... ')
 if search_salary.isdigit():
